@@ -26,18 +26,21 @@ class ChatModel {
 class ChatBody {
   String? session_id;
   String? message;
+  String? file_path;
 
-  ChatBody({this.session_id,this.message});
+  ChatBody({this.session_id,this.message,this.file_path,});
 
   factory ChatBody.fromJson(Map<String, dynamic> json) => ChatBody(
     session_id: json["session_id"],
     message: json["message"],
+    file_path: json["file_path"],
   );
 
 
   Map<String, dynamic> toJson() => {
     "session_id": session_id,
     "message": message,
+    if (file_path != null) "file_path": file_path,
   };
 
 }

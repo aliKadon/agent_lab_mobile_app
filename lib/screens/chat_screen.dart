@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -262,11 +263,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             isSending: isSending,
             pendingFileName: _pendingFileName,
             pendingType: _pendingType,
-            onClearAttachment: () => setState(() {
-              _pendingFile = null;
-              _pendingFileName = null;
-              _pendingType = null;
-            }),
+            onClearAttachment: () {
+              ref.read(mainProviderStateProvider.notifier).clearPendingAttachment();
+              setState(() {
+                _pendingFile = null;
+                _pendingFileName = null;
+                _pendingType = null;
+              });
+            },
             onAttachTap: _showAttachmentSheet,
             onSend: _sendMessage,
           ),
@@ -385,6 +389,11 @@ class _ChatBubble extends StatelessWidget {
                         ),
                       ),
                     ),
+                  if (message.fileUrl != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: _ResponseFilePreview(url: message.fileUrl!),
+                    ),
                 ],
               ),
       ),
@@ -438,6 +447,106 @@ class _FileChip extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ResponseFilePreview extends StatelessWidget {
+  final String url;
+
+  const _ResponseFilePreview({required this.url});
+
+  bool get _isImage {
+    final path = url.toLowerCase().split('?').first;
+    return path.endsWith('.jpg') ||
+        path.endsWith('.jpeg') ||
+        path.endsWith('.png') ||
+        path.endsWith('.gif') ||
+        path.endsWith('.webp') ||
+        path.endsWith('.bmp');
+  }
+
+  String get _fileName => url.split('/').last.split('?').first;
+
+  IconData get _fileIcon {
+    final path = url.toLowerCase().split('?').first;
+    if (path.endsWith('.pdf')) return Icons.picture_as_pdf_outlined;
+    if (path.endsWith('.mp3') ||
+        path.endsWith('.wav') ||
+        path.endsWith('.ogg') ||
+        path.endsWith('.m4a')) return Icons.audio_file_outlined;
+    return Icons.insert_drive_file_outlined;
+  }
+
+  Future<void> _open() async {
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isImage) {
+      return GestureDetector(
+        onTap: _open,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.network(
+            url,
+            fit: BoxFit.cover,
+            loadingBuilder: (_, child, progress) => progress == null
+                ? child
+                : Container(
+                    height: 140,
+                    alignment: Alignment.center,
+                    child: const CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Pallete.primary,
+                    ),
+                  ),
+            errorBuilder: (_, __, ___) => _buildFileChip(),
+          ),
+        ),
+      );
+    }
+    return _buildFileChip();
+  }
+
+  Widget _buildFileChip() {
+    return GestureDetector(
+      onTap: _open,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: Pallete.primary.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(_fileIcon, size: 16, color: Pallete.primary),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                _fileName,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Pallete.primary,
+                  fontWeight: FontWeight.w500,
+                  decoration: TextDecoration.underline,
+                  decorationColor: Pallete.primary,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Icon(Icons.open_in_new, size: 12, color: Pallete.primary),
+          ],
+        ),
       ),
     );
   }

@@ -1,13 +1,16 @@
 class UploadFilesModel {
+  String? file_path;
   List<dynamic>? detail;
 
-  UploadFilesModel({this.detail});
+  UploadFilesModel({this.file_path, this.detail});
 
   factory UploadFilesModel.fromJson(Map<String, dynamic> json) => UploadFilesModel(
+    file_path: json["file_path"],
     detail: json["detail"] == null ? null : List<dynamic>.from(json["detail"].map((x) => x)),
   );
 
   Map<String, dynamic> toJson() => {
+    "file_path": file_path,
     "detail": detail == null ? null : List<dynamic>.from(detail!.map((x) => x)),
   };
 

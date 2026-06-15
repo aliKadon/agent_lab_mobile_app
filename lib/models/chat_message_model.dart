@@ -6,6 +6,7 @@ class ChatMessageModel {
   final String? fileName;
   final ChatAttachmentType? attachmentType;
   final bool isLoading;
+  final String? fileUrl;
 
   const ChatMessageModel({
     this.text,
@@ -13,5 +14,6 @@ class ChatMessageModel {
     this.fileName,
     this.attachmentType,
     this.isLoading = false,
+    this.fileUrl,
   });
 }

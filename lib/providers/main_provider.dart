@@ -22,6 +22,7 @@ import 'common_providers.dart';
 class MainProvider extends StateNotifier<MainState> {
   final RepositoryImpl _repositoryImpl;
   StreamSubscription<dynamic>? _chatStreamSubscription;
+  String? _pendingFilePath;
 
   MainProvider({
     required RepositoryImpl repositoryImpl,
@@ -437,8 +438,15 @@ class MainProvider extends StateNotifier<MainState> {
         failure.checkAndTakeAction(onError: errorMessages);
         onResult(false);
       },
-      (_) => onResult(true),
+      (uploadResponse) {
+        _pendingFilePath = uploadResponse.file_path;
+        onResult(true);
+      },
     );
+  }
+
+  void clearPendingAttachment() {
+    _pendingFilePath = null;
   }
 
   Future<void> sendChatMessage({
@@ -459,9 +467,13 @@ class MainProvider extends StateNotifier<MainState> {
       chatMessages: [...state.chatMessages, userMsg, loadingMsg],
     );
 
+    final filePath = _pendingFilePath;
+    _pendingFilePath = null;
+
     final body = ChatBody(
       session_id: "test",
       message: message.isEmpty ? null : message,
+      file_path: filePath,
     );
 
     final result = await _repositoryImpl.getChat(body: body);
@@ -479,7 +491,14 @@ class MainProvider extends StateNotifier<MainState> {
         state = state.copyWith(
           isSendingMessage: false,
           chatSessionId: chatResponse.session_id ?? state.chatSessionId,
-          chatMessages: [...msgs, ChatMessageModel(text: chatResponse.reply, isUser: false)],
+          chatMessages: [
+            ...msgs,
+            ChatMessageModel(
+              text: chatResponse.reply,
+              isUser: false,
+              fileUrl: chatResponse.file_url,
+            ),
+          ],
         );
       },
     );
