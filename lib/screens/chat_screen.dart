@@ -4,11 +4,14 @@ import 'package:agent_lab/models/chat_message_model.dart';
 import 'package:agent_lab/providers/main_provider.dart';
 import 'package:agent_lab/utils/constants/app_enums.dart';
 import 'package:agent_lab/utils/constants/pallete.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:chewie/chewie.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -457,25 +460,41 @@ class _ResponseFilePreview extends StatelessWidget {
 
   const _ResponseFilePreview({required this.url});
 
-  bool get _isImage {
-    final path = url.toLowerCase().split('?').first;
-    return path.endsWith('.jpg') ||
-        path.endsWith('.jpeg') ||
-        path.endsWith('.png') ||
-        path.endsWith('.gif') ||
-        path.endsWith('.webp') ||
-        path.endsWith('.bmp');
-  }
+  String get _path => url.toLowerCase().split('?').first;
+
+  bool get _isImage =>
+      _path.endsWith('.jpg') ||
+      _path.endsWith('.jpeg') ||
+      _path.endsWith('.png') ||
+      _path.endsWith('.gif') ||
+      _path.endsWith('.webp') ||
+      _path.endsWith('.bmp');
+
+  bool get _isAudio =>
+      _path.endsWith('.mp3') ||
+      _path.endsWith('.wav') ||
+      _path.endsWith('.ogg') ||
+      _path.endsWith('.m4a') ||
+      _path.endsWith('.aac') ||
+      _path.endsWith('.flac') ||
+      _path.endsWith('.opus') ||
+      _path.endsWith('.wma');
+
+  bool get _isVideo =>
+      _path.endsWith('.mp4') ||
+      _path.endsWith('.mov') ||
+      _path.endsWith('.avi') ||
+      _path.endsWith('.mkv') ||
+      _path.endsWith('.webm') ||
+      _path.endsWith('.m4v') ||
+      _path.endsWith('.3gp');
 
   String get _fileName => url.split('/').last.split('?').first;
 
   IconData get _fileIcon {
-    final path = url.toLowerCase().split('?').first;
-    if (path.endsWith('.pdf')) return Icons.picture_as_pdf_outlined;
-    if (path.endsWith('.mp3') ||
-        path.endsWith('.wav') ||
-        path.endsWith('.ogg') ||
-        path.endsWith('.m4a')) return Icons.audio_file_outlined;
+    if (_path.endsWith('.pdf')) return Icons.picture_as_pdf_outlined;
+    if (_isAudio) return Icons.audio_file_outlined;
+    if (_isVideo) return Icons.video_file_outlined;
     return Icons.insert_drive_file_outlined;
   }
 
@@ -488,6 +507,8 @@ class _ResponseFilePreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (_isAudio) return _AudioPlayerWidget(url: url);
+    if (_isVideo) return _VideoPlayerWidget(url: url);
     if (_isImage) {
       return GestureDetector(
         onTap: _open,
@@ -547,6 +568,237 @@ class _ResponseFilePreview extends StatelessWidget {
             const Icon(Icons.open_in_new, size: 12, color: Pallete.primary),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ─── Inline audio player ──────────────────────────────────────────────────────
+
+class _AudioPlayerWidget extends StatefulWidget {
+  final String url;
+  const _AudioPlayerWidget({required this.url});
+
+  @override
+  State<_AudioPlayerWidget> createState() => _AudioPlayerWidgetState();
+}
+
+class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
+  final _player = AudioPlayer();
+  PlayerState _state = PlayerState.stopped;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _player.onPlayerStateChanged.listen((s) {
+      if (mounted) setState(() => _state = s);
+    });
+    _player.onPositionChanged.listen((p) {
+      if (mounted) setState(() => _position = p);
+    });
+    _player.onDurationChanged.listen((d) {
+      if (mounted) setState(() => _duration = d);
+    });
+    _player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _position = Duration.zero);
+    });
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggle() async {
+    if (_state == PlayerState.playing) {
+      await _player.pause();
+    } else {
+      await _player.play(UrlSource(widget.url));
+    }
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isPlaying = _state == PlayerState.playing;
+    final progress = _duration.inMilliseconds > 0
+        ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+      decoration: BoxDecoration(
+        color: Pallete.primary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _toggle,
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: const BoxDecoration(
+                color: Pallete.primary,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                color: Pallete.white,
+                size: 20,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2,
+                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                    activeTrackColor: Pallete.primary,
+                    inactiveTrackColor: Pallete.primary.withValues(alpha: 0.2),
+                    thumbColor: Pallete.primary,
+                    overlayColor: Pallete.primary.withValues(alpha: 0.15),
+                  ),
+                  child: Slider(
+                    value: progress,
+                    onChanged: _duration.inMilliseconds > 0
+                        ? (v) {
+                            final pos = Duration(
+                              milliseconds: (v * _duration.inMilliseconds).round(),
+                            );
+                            _player.seek(pos);
+                          }
+                        : null,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(_fmt(_position),
+                          style: const TextStyle(color: Pallete.grey, fontSize: 10)),
+                      Text(_fmt(_duration),
+                          style: const TextStyle(color: Pallete.grey, fontSize: 10)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Inline video player ──────────────────────────────────────────────────────
+
+class _VideoPlayerWidget extends StatefulWidget {
+  final String url;
+  const _VideoPlayerWidget({required this.url});
+
+  @override
+  State<_VideoPlayerWidget> createState() => _VideoPlayerWidgetState();
+}
+
+class _VideoPlayerWidgetState extends State<_VideoPlayerWidget> {
+  late VideoPlayerController _vpController;
+  ChewieController? _chewieController;
+  bool _hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _vpController = VideoPlayerController.networkUrl(Uri.parse(widget.url));
+    _vpController.initialize().then((_) {
+      if (!mounted) return;
+      setState(() {
+        _chewieController = ChewieController(
+          videoPlayerController: _vpController,
+          aspectRatio: _vpController.value.aspectRatio,
+          autoPlay: false,
+          looping: false,
+          placeholder: Container(color: Colors.black),
+          materialProgressColors: ChewieProgressColors(
+            playedColor: Pallete.primary,
+            handleColor: Pallete.primary,
+            backgroundColor: Pallete.primary.withValues(alpha: 0.2),
+            bufferedColor: Pallete.primary.withValues(alpha: 0.4),
+          ),
+        );
+      });
+    }).catchError((_) {
+      if (mounted) setState(() => _hasError = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _vpController.dispose();
+    _chewieController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_hasError) {
+      return Container(
+        height: 100,
+        decoration: BoxDecoration(
+          color: Pallete.primary.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
+        ),
+        child: const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline, color: Pallete.grey, size: 24),
+              SizedBox(height: 4),
+              Text('Could not load video',
+                  style: TextStyle(color: Pallete.grey, fontSize: 12)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_chewieController == null) {
+      return AspectRatio(
+        aspectRatio: 16 / 9,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Center(
+            child: CircularProgressIndicator(color: Pallete.primary, strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: AspectRatio(
+        aspectRatio: _vpController.value.aspectRatio,
+        child: Chewie(controller: _chewieController!),
       ),
     );
   }
