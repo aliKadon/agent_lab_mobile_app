@@ -147,11 +147,11 @@ class MainProvider extends StateNotifier<MainState> {
               final updated = isProgress && current.isNotEmpty && current.last.isProgress
                   ? [
                       ...current.sublist(0, current.length - 1),
-                      CreateAgentChatMessage(content: event.message!, isUser: false, isProgress: true),
+                      CreateAgentChatMessage(content: event.message!, isUser: false, isProgress: true, isActivity: true),
                     ]
                   : [
                       ...current,
-                      CreateAgentChatMessage(content: event.message!, isUser: false, isProgress: isProgress),
+                      CreateAgentChatMessage(content: event.message!, isUser: false, isProgress: isProgress, isActivity: true),
                     ];
               state = state.copyWith(agentChatMessages: updated);
             }
@@ -453,12 +453,19 @@ class MainProvider extends StateNotifier<MainState> {
     required String message,
     String? attachmentName,
     ChatAttachmentType? attachmentType,
+    String? localPath,
+    String? uploadedPath,
   }) async {
+    final filePath = uploadedPath ?? _pendingFilePath;
+    _pendingFilePath = null;
+
     final userMsg = ChatMessageModel(
       text: message.isEmpty ? null : message,
       isUser: true,
       fileName: attachmentName,
       attachmentType: attachmentType,
+      localPath: localPath,
+      uploadedPath: filePath,
     );
     const loadingMsg = ChatMessageModel(isUser: false, isLoading: true);
 
@@ -466,9 +473,6 @@ class MainProvider extends StateNotifier<MainState> {
       isSendingMessage: true,
       chatMessages: [...state.chatMessages, userMsg, loadingMsg],
     );
-
-    final filePath = _pendingFilePath;
-    _pendingFilePath = null;
 
     final body = ChatBody(
       session_id: "test",
@@ -484,7 +488,10 @@ class MainProvider extends StateNotifier<MainState> {
         failure.checkAndTakeAction(onError: errorMessages);
         state = state.copyWith(
           isSendingMessage: false,
-          chatMessages: [...msgs, ChatMessageModel(text: 'Failed to get a response.', isUser: false)],
+          chatMessages: [
+            ...msgs,
+            ChatMessageModel(text: failure.message, isUser: false, isError: true),
+          ],
         );
       },
       (chatResponse) {
@@ -504,6 +511,36 @@ class MainProvider extends StateNotifier<MainState> {
     );
   }
 
+  /// Re-sends the last user message after a failed response.
+  Future<void> retryLastMessage() async {
+    if (state.isSendingMessage) return;
+    final msgs = state.chatMessages;
+    final lastUserIndex = msgs.lastIndexWhere((m) => m.isUser);
+    if (lastUserIndex == -1) return;
+    final lastUser = msgs[lastUserIndex];
+
+    state = state.copyWith(chatMessages: msgs.sublist(0, lastUserIndex));
+    await sendChatMessage(
+      message: lastUser.text ?? '',
+      attachmentName: lastUser.fileName,
+      attachmentType: lastUser.attachmentType,
+      localPath: lastUser.localPath,
+      uploadedPath: lastUser.uploadedPath,
+    );
+  }
+
+  void clearChat() {
+    if (state.isSendingMessage) return;
+    _pendingFilePath = null;
+    state = state.copyWith(chatMessages: []);
+  }
+
+  /// Undo for [clearChat].
+  void restoreChat(List<ChatMessageModel> messages) {
+    if (state.chatMessages.isNotEmpty) return;
+    state = state.copyWith(chatMessages: messages);
+  }
+
   void resetCreationFlow() {
     _chatStreamSubscription?.cancel();
     _chatStreamSubscription = null;
@@ -512,6 +549,11 @@ class MainProvider extends StateNotifier<MainState> {
       isLoadingDetails: state.isLoadingDetails,
       allAgentsList: state.allAgentsList,
       selectedAgentDetails: state.selectedAgentDetails,
+      // Keep the chat conversation intact — creating an agent shouldn't wipe it.
+      isSendingMessage: state.isSendingMessage,
+      isUploadingFile: state.isUploadingFile,
+      chatMessages: state.chatMessages,
+      chatSessionId: state.chatSessionId,
     );
   }
 

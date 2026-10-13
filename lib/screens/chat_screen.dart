@@ -1,13 +1,22 @@
 import 'dart:io';
 
+import 'package:agent_lab/common/widgets/ui/agent_avatar.dart';
+import 'package:agent_lab/common/widgets/ui/app_snack.dart';
+import 'package:agent_lab/common/widgets/ui/composer.dart';
+import 'package:agent_lab/common/widgets/ui/primitives.dart';
+import 'package:agent_lab/models/all_agents_list_model.dart';
 import 'package:agent_lab/models/chat_message_model.dart';
 import 'package:agent_lab/providers/main_provider.dart';
+import 'package:agent_lab/screens/create_agent_screen.dart';
 import 'package:agent_lab/utils/constants/app_enums.dart';
-import 'package:agent_lab/utils/constants/pallete.dart';
+import 'package:agent_lab/utils/theme/app_tokens.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:chewie/chewie.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_animate/flutter_animate.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -20,60 +29,58 @@ class ChatScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends ConsumerState<ChatScreen>
-    with SingleTickerProviderStateMixin {
+class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _textController = TextEditingController();
   final _scrollController = ScrollController();
-  late final AnimationController _typingController;
 
   File? _pendingFile;
   String? _pendingFileName;
   ChatAttachmentType? _pendingType;
   bool _isUploading = false;
+  bool _showJumpButton = false;
+
+  /// Messages at or beyond this index animate in; older ones render statically
+  /// so scrolling back through history doesn't replay entrance animations.
+  int _animateFrom = 1 << 30;
 
   @override
   void initState() {
     super.initState();
-    _typingController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
+    _animateFrom = ref.read(mainProviderStateProvider).chatMessages.length;
+    _scrollController.addListener(() {
+      final show = _scrollController.hasClients && _scrollController.offset > 320;
+      if (show != _showJumpButton) setState(() => _showJumpButton = show);
+    });
   }
 
   @override
   void dispose() {
     _textController.dispose();
     _scrollController.dispose();
-    _typingController.dispose();
     super.dispose();
   }
 
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+  void _jumpToLatest() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(0, duration: AppMotion.slow, curve: AppMotion.emphasized);
   }
 
-  Future<void> _pickAttachment(ChatAttachmentType type) async {
+  // ─── Attachments ────────────────────────────────────────────────────────
+
+  Future<void> _pick(ChatAttachmentType type, {bool camera = false}) async {
     Navigator.pop(context);
     File? picked;
     String? name;
 
     try {
       if (type == ChatAttachmentType.image) {
-        final img = await ImagePicker().pickImage(source: ImageSource.gallery);
+        final img = await ImagePicker().pickImage(source: camera ? ImageSource.camera : ImageSource.gallery);
         if (img == null) return;
         picked = File(img.path);
         name = img.name;
       } else if (type == ChatAttachmentType.audio) {
         final result = await FilePicker.platform.pickFiles(type: FileType.audio);
-        if (result == null || result.files.isEmpty) return;
+        if (result == null || result.files.isEmpty || result.files.first.path == null) return;
         picked = File(result.files.first.path!);
         name = result.files.first.name;
       } else {
@@ -81,13 +88,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           type: FileType.custom,
           allowedExtensions: ['pdf', 'doc', 'docx', 'txt', 'ppt', 'pptx', 'xls', 'xlsx', 'csv'],
         );
-        if (result == null || result.files.isEmpty) return;
+        if (result == null || result.files.isEmpty || result.files.first.path == null) return;
         picked = File(result.files.first.path!);
         name = result.files.first.name;
       }
     } catch (_) {
+      showAppSnack('Couldn\'t open that file. Check app permissions.', tone: SnackTone.error);
       return;
     }
+    if (!mounted) return;
 
     setState(() {
       _isUploading = true;
@@ -97,104 +106,64 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     });
 
     await ref.read(mainProviderStateProvider.notifier).uploadChatAttachment(
-      file: picked!,
-      onResult: (success) {
-        if (mounted) {
-          setState(() => _isUploading = false);
-          if (!success) {
+          file: picked,
+          onResult: (success) {
+            if (!mounted) return;
             setState(() {
-              _pendingFile = null;
-              _pendingFileName = null;
-              _pendingType = null;
+              _isUploading = false;
+              if (!success) _clearPending();
             });
-          }
-        }
-      },
-    );
+          },
+        );
   }
 
-  Future<void> _pickFromCamera() async {
-    Navigator.pop(context);
-    final img = await ImagePicker().pickImage(source: ImageSource.camera);
-    if (img == null || !mounted) return;
-
-    final file = File(img.path);
-    setState(() {
-      _isUploading = true;
-      _pendingFile = file;
-      _pendingFileName = img.name;
-      _pendingType = ChatAttachmentType.image;
-    });
-
-    await ref.read(mainProviderStateProvider.notifier).uploadChatAttachment(
-      file: file,
-      onResult: (success) {
-        if (mounted) {
-          setState(() => _isUploading = false);
-          if (!success) {
-            setState(() {
-              _pendingFile = null;
-              _pendingFileName = null;
-              _pendingType = null;
-            });
-          }
-        }
-      },
-    );
+  void _clearPending() {
+    _pendingFile = null;
+    _pendingFileName = null;
+    _pendingType = null;
   }
 
   void _showAttachmentSheet() {
+    FocusScope.of(context).unfocus();
     showModalBottomSheet(
       context: context,
-      backgroundColor: Pallete.grey19,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
       builder: (_) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+          padding: const EdgeInsets.fromLTRB(AppSpace.md, 0, AppSpace.md, AppSpace.md),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Pallete.grey,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 20),
+              const Text('Add to message', style: AppText.title3),
+              const SizedBox(height: AppSpace.md),
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   _AttachOption(
-                    icon: Icons.photo_library_outlined,
-                    label: 'Gallery',
-                    color: Colors.blueAccent,
-                    onTap: () => _pickAttachment(ChatAttachmentType.image),
+                    icon: Icons.photo_library_rounded,
+                    label: 'Photos',
+                    color: AppColors.info,
+                    onTap: () => _pick(ChatAttachmentType.image),
                   ),
                   _AttachOption(
-                    icon: Icons.camera_alt_outlined,
+                    icon: Icons.photo_camera_rounded,
                     label: 'Camera',
-                    color: Colors.green,
-                    onTap: _pickFromCamera,
+                    color: AppColors.success,
+                    onTap: () => _pick(ChatAttachmentType.image, camera: true),
                   ),
                   _AttachOption(
-                    icon: Icons.insert_drive_file_outlined,
+                    icon: Icons.description_rounded,
                     label: 'Document',
-                    color: Colors.orange,
-                    onTap: () => _pickAttachment(ChatAttachmentType.document),
+                    color: AppColors.warning,
+                    onTap: () => _pick(ChatAttachmentType.document),
                   ),
                   _AttachOption(
-                    icon: Icons.mic_outlined,
+                    icon: Icons.graphic_eq_rounded,
                     label: 'Audio',
-                    color: Pallete.primary,
-                    onTap: () => _pickAttachment(ChatAttachmentType.audio),
+                    color: AppColors.magenta,
+                    onTap: () => _pick(ChatAttachmentType.audio),
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
             ],
           ),
         ),
@@ -202,29 +171,55 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     );
   }
 
-  Future<void> _sendMessage() async {
-    final text = _textController.text.trim();
+  // ─── Sending ───────────────────────────────────────────────────────────
+
+  Future<void> _send([String? preset]) async {
+    final text = (preset ?? _textController.text).trim();
     if (text.isEmpty && _pendingFileName == null) return;
+    if (_isUploading || ref.read(mainProviderStateProvider).isSendingMessage) return;
 
     final attachmentName = _pendingFileName;
     final attachmentType = _pendingType;
+    final localPath = _pendingFile?.path;
 
     _textController.clear();
-    setState(() {
-      _pendingFile = null;
-      _pendingFileName = null;
-      _pendingType = null;
-    });
-
-    _scrollToBottom();
+    setState(_clearPending);
+    _jumpToLatest();
 
     await ref.read(mainProviderStateProvider.notifier).sendChatMessage(
-      message: text,
-      attachmentName: attachmentName,
-      attachmentType: attachmentType,
-    );
+          message: text,
+          attachmentName: attachmentName,
+          attachmentType: attachmentType,
+          localPath: localPath,
+        );
+  }
 
-    _scrollToBottom();
+  void _newChat() {
+    final notifier = ref.read(mainProviderStateProvider.notifier);
+    final previous = List<ChatMessageModel>.from(ref.read(mainProviderStateProvider).chatMessages);
+    if (previous.isEmpty) return;
+    notifier.clearChat();
+    setState(() => _animateFrom = 0);
+    showAppSnack(
+      'Started a new chat',
+      action: SnackBarAction(
+        label: 'Undo',
+        textColor: AppColors.brand,
+        onPressed: () {
+          setState(() => _animateFrom = previous.length);
+          notifier.restoreChat(previous);
+        },
+      ),
+    );
+  }
+
+  void _openParticipants() {
+    FocusScope.of(context).unfocus();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => const _ParticipantsSheet(),
+    );
   }
 
   @override
@@ -232,50 +227,339 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     final state = ref.watch(mainProviderStateProvider);
     final messages = state.chatMessages;
     final isSending = state.isSendingMessage;
-
-    if (messages.isNotEmpty) _scrollToBottom();
+    final agents = state.allAgentsList?.agents ?? const <AgentModel>[];
+    final activeNames = agents.where((a) => a.active == true).map((a) => a.name ?? '?').toList();
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Chat'),
-        centerTitle: false,
+      appBar: _ChatAppBar(
+        activeNames: activeNames,
+        hasMessages: messages.isNotEmpty,
+        busy: isSending,
+        onParticipants: _openParticipants,
+        onNewChat: _newChat,
       ),
       body: Column(
         children: [
           Expanded(
-            child: messages.isEmpty
-                ? _EmptyChat(onSuggestionTap: (text) {
-                    _textController.text = text;
-                  })
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) {
-                      final msg = messages[index];
-                      return _ChatBubble(
-                        message: msg,
-                        typingController: _typingController,
+            child: Stack(
+              children: [
+                messages.isEmpty
+                    ? _EmptyChat(
+                        activeNames: activeNames,
+                        onSuggestion: _send,
+                        onChooseAgents: _openParticipants,
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        reverse: true,
+                        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                        padding: const EdgeInsets.fromLTRB(AppSpace.md, AppSpace.md, AppSpace.md, AppSpace.xs),
+                        itemCount: messages.length,
+                        itemBuilder: (context, i) {
+                          final index = messages.length - 1 - i;
+                          final msg = messages[index];
+                          final prevIsUser = index > 0 ? messages[index - 1].isUser : null;
+                          Widget child = _MessageRow(
+                            message: msg,
+                            isLatest: i == 0,
+                            groupedWithPrevious: prevIsUser == msg.isUser,
+                            onRetry: () => ref.read(mainProviderStateProvider.notifier).retryLastMessage(),
+                          );
+                          if (index >= _animateFrom) {
+                            child = child
+                                .animate()
+                                .fadeIn(duration: AppMotion.base)
+                                .moveY(begin: 12, end: 0, curve: AppMotion.emphasized);
+                          }
+                          return child;
+                        },
+                      ),
+                Positioned(
+                  right: AppSpace.md,
+                  bottom: AppSpace.sm,
+                  child: AnimatedScale(
+                    scale: _showJumpButton ? 1 : 0,
+                    duration: AppMotion.base,
+                    curve: AppMotion.emphasized,
+                    child: CircleIconButton(
+                      icon: Icons.arrow_downward_rounded,
+                      tooltip: 'Jump to latest',
+                      background: AppColors.surface3,
+                      onPressed: _jumpToLatest,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(AppSpace.sm, AppSpace.xs, AppSpace.sm, AppSpace.sm),
+              child: Composer(
+                controller: _textController,
+                hintText: activeNames.isEmpty ? 'Message the lab…' : 'Message ${activeNames.length == 1 ? activeNames.first : 'your agents'}…',
+                busy: isSending,
+                onSend: _send,
+                onAttach: _showAttachmentSheet,
+                canSendEmpty: _pendingFileName != null && !_isUploading,
+                enabled: !_isUploading,
+                header: _pendingFileName == null
+                    ? null
+                    : _PendingAttachment(
+                        file: _pendingFile,
+                        name: _pendingFileName!,
+                        type: _pendingType,
+                        uploading: _isUploading,
+                        onClear: () {
+                          ref.read(mainProviderStateProvider.notifier).clearPendingAttachment();
+                          setState(_clearPending);
+                        },
+                      ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── App bar ─────────────────────────────────────────────────────────────────
+
+class _ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
+  final List<String> activeNames;
+  final bool hasMessages;
+  final bool busy;
+  final VoidCallback onParticipants;
+  final VoidCallback onNewChat;
+
+  const _ChatAppBar({
+    required this.activeNames,
+    required this.hasMessages,
+    required this.busy,
+    required this.onParticipants,
+    required this.onNewChat,
+  });
+
+  @override
+  Size get preferredSize => const Size.fromHeight(64);
+
+  @override
+  Widget build(BuildContext context) {
+    final count = activeNames.length;
+    return AppBar(
+      toolbarHeight: 64,
+      titleSpacing: AppSpace.md,
+      shape: const Border(bottom: BorderSide(color: AppColors.border)),
+      title: Semantics(
+        button: true,
+        label: 'Manage agents in chat',
+        child: Pressable(
+          onTap: onParticipants,
+          pressedScale: 0.98,
+          child: Row(
+            children: [
+              const LabMark(size: 36),
+              const SizedBox(width: AppSpace.sm),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Chat', style: AppText.title3),
+                    const SizedBox(height: 2),
+                    AnimatedSwitcher(
+                      duration: AppMotion.base,
+                      child: Row(
+                        key: ValueKey('$busy-$count'),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (busy) ...[
+                            const TypingDots(color: AppColors.brand),
+                            const SizedBox(width: 6),
+                            Text('Thinking', style: AppText.caption.copyWith(color: AppColors.brand)),
+                          ] else if (count > 0) ...[
+                            AvatarStack(names: activeNames, size: 16, max: 3),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                '$count agent${count == 1 ? '' : 's'} listening',
+                                style: AppText.caption,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const Icon(Icons.expand_more_rounded, size: 16, color: AppColors.textTertiary),
+                          ] else ...[
+                            Text('Tap to add agents', style: AppText.caption.copyWith(color: AppColors.warning)),
+                            const Icon(Icons.expand_more_rounded, size: 16, color: AppColors.warning),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        if (hasMessages)
+          Padding(
+            padding: const EdgeInsets.only(right: AppSpace.md),
+            child: CircleIconButton(
+              icon: Icons.edit_square,
+              tooltip: 'New chat',
+              size: 38,
+              onPressed: busy ? null : onNewChat,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ─── Participants sheet ──────────────────────────────────────────────────────
+
+class _ParticipantsSheet extends ConsumerStatefulWidget {
+  const _ParticipantsSheet();
+
+  @override
+  ConsumerState<_ParticipantsSheet> createState() => _ParticipantsSheetState();
+}
+
+class _ParticipantsSheetState extends ConsumerState<_ParticipantsSheet> {
+  final Set<String> _busy = {};
+
+  Future<void> _toggle(AgentModel agent) async {
+    final name = agent.name;
+    if (name == null || _busy.contains(name)) return;
+    setState(() => _busy.add(name));
+    final notifier = ref.read(mainProviderStateProvider.notifier);
+    if (agent.active == true) {
+      await notifier.removeAgentFromChat(agentName: name);
+    } else {
+      await notifier.addAgentToChat(agentName: name);
+    }
+    if (mounted) setState(() => _busy.remove(name));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final agents = ref.watch(mainProviderStateProvider.select((s) => s.allAgentsList?.agents ?? const <AgentModel>[]));
+    final sorted = [...agents]..sort((a, b) => (b.active == true ? 1 : 0) - (a.active == true ? 1 : 0));
+    final activeCount = agents.where((a) => a.active == true).length;
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.62,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      builder: (context, scroll) => Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(AppSpace.gutter, 0, AppSpace.gutter, AppSpace.md),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Agents in this chat', style: AppText.title2),
+                      const SizedBox(height: 4),
+                      Text(
+                        activeCount == 0
+                            ? 'Turn agents on to let them answer your messages.'
+                            : '$activeCount of ${agents.length} can answer your messages.',
+                        style: AppText.bodySecondary,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: agents.isEmpty
+                ? EmptyState(
+                    icon: Icons.smart_toy_outlined,
+                    title: 'No agents yet',
+                    message: 'Create an agent and it will show up here.',
+                    action: GradientButton(
+                      label: 'Create agent',
+                      icon: Icons.auto_awesome_rounded,
+                      expand: false,
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CreateAgentScreen()));
+                      },
+                    ),
+                  )
+                : ListView.separated(
+                    controller: scroll,
+                    padding: EdgeInsets.fromLTRB(
+                      AppSpace.md,
+                      0,
+                      AppSpace.md,
+                      MediaQuery.paddingOf(context).bottom + AppSpace.md,
+                    ),
+                    itemCount: sorted.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: AppSpace.xs),
+                    itemBuilder: (context, i) {
+                      final a = sorted[i];
+                      final name = a.name ?? 'Agent';
+                      final active = a.active == true;
+                      final busy = _busy.contains(name);
+                      return Pressable(
+                        pressedScale: 0.985,
+                        onTap: () => _toggle(a),
+                        child: AnimatedContainer(
+                          duration: AppMotion.base,
+                          padding: const EdgeInsets.all(AppSpace.sm),
+                          decoration: BoxDecoration(
+                            color: active ? AppColors.success.withValues(alpha: 0.06) : AppColors.surface2,
+                            borderRadius: BorderRadius.circular(AppRadius.md),
+                            border: Border.all(
+                              color: active ? AppColors.success.withValues(alpha: 0.3) : AppColors.border,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              AgentAvatar(name: name, size: 40, active: active),
+                              const SizedBox(width: AppSpace.sm),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(name, style: AppText.label.copyWith(fontSize: 14.5), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                    if ((a.description ?? '').isNotEmpty)
+                                      Text(
+                                        a.description!,
+                                        style: AppText.caption,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: AppSpace.xs),
+                              busy
+                                  ? const Padding(
+                                      padding: EdgeInsets.all(12),
+                                      child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                                    )
+                                  : Switch(
+                                      value: active,
+                                      activeTrackColor: AppColors.success,
+                                      onChanged: (_) => _toggle(a),
+                                    ),
+                            ],
+                          ),
+                        ),
                       );
                     },
                   ),
-          ),
-          _BottomBar(
-            controller: _textController,
-            isUploading: _isUploading,
-            isSending: isSending,
-            pendingFileName: _pendingFileName,
-            pendingType: _pendingType,
-            onClearAttachment: () {
-              ref.read(mainProviderStateProvider.notifier).clearPendingAttachment();
-              setState(() {
-                _pendingFile = null;
-                _pendingFileName = null;
-                _pendingType = null;
-              });
-            },
-            onAttachTap: _showAttachmentSheet,
-            onSend: _sendMessage,
           ),
         ],
       ),
@@ -286,174 +570,540 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 // ─── Empty state ─────────────────────────────────────────────────────────────
 
 class _EmptyChat extends StatelessWidget {
-  final ValueChanged<String> onSuggestionTap;
+  final List<String> activeNames;
+  final ValueChanged<String> onSuggestion;
+  final VoidCallback onChooseAgents;
 
-  const _EmptyChat({required this.onSuggestionTap});
+  const _EmptyChat({required this.activeNames, required this.onSuggestion, required this.onChooseAgents});
 
-  @override
-  Widget build(BuildContext context) {
-    const suggestions = [
-      'What can you help me with?',
-      'Summarize a document for me',
-      'Analyze this file',
-    ];
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: Pallete.primary.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.chat_bubble_outline_rounded, color: Pallete.primary, size: 36),
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'Start a conversation',
-            style: TextStyle(color: Pallete.white, fontSize: 17, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Ask anything or share a file',
-            style: TextStyle(color: Pallete.grey, fontSize: 13),
-          ),
-          const SizedBox(height: 28),
-          ...suggestions.map(
-            (s) => GestureDetector(
-              onTap: () => onSuggestionTap(s),
-              child: Container(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: Pallete.grey19,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
-                ),
-                child: Text(s, style: const TextStyle(color: Pallete.white, fontSize: 13)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Chat bubble ─────────────────────────────────────────────────────────────
-
-class _ChatBubble extends StatelessWidget {
-  final ChatMessageModel message;
-  final AnimationController typingController;
-
-  const _ChatBubble({required this.message, required this.typingController});
+  static const _suggestions = [
+    (Icons.lightbulb_outline_rounded, 'What can you do?', 'What can you help me with?'),
+    (Icons.summarize_outlined, 'Summarize', 'Summarize a document for me'),
+    (Icons.insights_rounded, 'Analyze a file', 'Analyze this file and give me the key insights'),
+    (Icons.translate_rounded, 'Translate', 'Translate this text into Spanish'),
+  ];
 
   @override
   Widget build(BuildContext context) {
-    final isUser = message.isUser;
-
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: isUser ? Pallete.primary : Pallete.grey19,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: Radius.circular(isUser ? 16 : 4),
-            bottomRight: Radius.circular(isUser ? 4 : 16),
+    if (activeNames.isEmpty) {
+      return SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 80),
+          child: EmptyState(
+            icon: Icons.group_add_rounded,
+            title: 'Invite agents to the chat',
+            message: 'Agents you add here can read your messages and files and answer you directly.',
+            action: GradientButton(
+              label: 'Choose agents',
+              icon: Icons.add_rounded,
+              expand: false,
+              onPressed: onChooseAgents,
+            ),
           ),
         ),
-        child: message.isLoading
-            ? _TypingIndicator(controller: typingController)
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
+      );
+    }
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(AppSpace.gutter, AppSpace.xxl, AppSpace.gutter, AppSpace.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const LabMark(size: 52)
+              .animate(onPlay: (c) => c.repeat(reverse: true))
+              .scaleXY(begin: 1, end: 1.06, duration: 1800.ms, curve: Curves.easeInOut),
+          const SizedBox(height: AppSpace.lg),
+          const Text('What can we do\nfor you today?', style: AppText.display),
+          const SizedBox(height: AppSpace.sm),
+          Pressable(
+            onTap: onChooseAgents,
+            child: Row(
+              children: [
+                AvatarStack(names: activeNames, size: 22),
+                const SizedBox(width: AppSpace.xs),
+                Flexible(
+                  child: Text(
+                    activeNames.length == 1
+                        ? '${activeNames.first} is ready'
+                        : '${activeNames.length} agents are ready',
+                    style: AppText.bodySecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: AppSpace.xl),
+          LayoutBuilder(
+            builder: (context, c) {
+              final w = (c.maxWidth - AppSpace.xs) / 2;
+              return Wrap(
+                spacing: AppSpace.xs,
+                runSpacing: AppSpace.xs,
                 children: [
-                  if (message.fileName != null)
-                    _FileChip(
-                      name: message.fileName!,
-                      type: message.attachmentType,
-                      isUser: isUser,
-                    ),
-                  if (message.text != null && message.text!.isNotEmpty)
-                    Padding(
-                      padding: EdgeInsets.only(top: message.fileName != null ? 6 : 0),
-                      child: Text(
-                        message.text!,
-                        style: TextStyle(
-                          color: isUser ? Pallete.white : Pallete.white,
-                          fontSize: 14,
-                          height: 1.45,
+                  for (final (i, s) in _suggestions.indexed)
+                    SizedBox(
+                      width: w,
+                      child: Pressable(
+                        onTap: () => onSuggestion(s.$3),
+                        child: Surface(
+                          padding: const EdgeInsets.all(AppSpace.md),
+                          radius: AppRadius.md,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(s.$1, size: 20, color: AppColors.brand),
+                              const SizedBox(height: AppSpace.sm),
+                              Text(s.$2, style: AppText.label),
+                              const SizedBox(height: 2),
+                              Text(s.$3, style: AppText.caption, maxLines: 2, overflow: TextOverflow.ellipsis),
+                            ],
+                          ),
                         ),
-                      ),
-                    ),
-                  if (message.fileUrl != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: _ResponseFilePreview(url: message.fileUrl!),
+                      ).animate().fadeIn(delay: (60 * i).ms, duration: AppMotion.slow).moveY(begin: 10, end: 0),
                     ),
                 ],
+              );
+            },
+          ),
+        ],
+      ).animate().fadeIn(duration: AppMotion.slow),
+    );
+  }
+}
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+class _MessageRow extends StatelessWidget {
+  final ChatMessageModel message;
+  final bool isLatest;
+  final bool groupedWithPrevious;
+  final VoidCallback onRetry;
+
+  const _MessageRow({
+    required this.message,
+    required this.isLatest,
+    required this.groupedWithPrevious,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final topGap = groupedWithPrevious ? AppSpace.xs : AppSpace.lg;
+    return Padding(
+      padding: EdgeInsets.only(top: topGap),
+      child: message.isUser
+          ? _UserMessage(message: message)
+          : _AssistantMessage(message: message, isLatest: isLatest, onRetry: onRetry),
+    );
+  }
+}
+
+class _UserMessage extends StatelessWidget {
+  final ChatMessageModel message;
+  const _UserMessage({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final maxW = MediaQuery.sizeOf(context).width * 0.78;
+    final hasText = (message.text ?? '').isNotEmpty;
+    final isImage = message.attachmentType == ChatAttachmentType.image && message.localPath != null;
+
+    return Align(
+      alignment: Alignment.centerRight,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxW),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (isImage)
+              Padding(
+                padding: EdgeInsets.only(bottom: hasText ? 4 : 0),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                  child: Image.file(
+                    File(message.localPath!),
+                    width: 220,
+                    fit: BoxFit.cover,
+                    cacheWidth: 660,
+                    errorBuilder: (_, __, ___) => _AttachmentChip(name: message.fileName ?? 'Image', type: message.attachmentType),
+                  ),
+                ),
+              )
+            else if (message.fileName != null)
+              Padding(
+                padding: EdgeInsets.only(bottom: hasText ? 4 : 0),
+                child: _AttachmentChip(name: message.fileName!, type: message.attachmentType),
               ),
+            if (hasText)
+              GestureDetector(
+                onLongPress: () {
+                  HapticFeedback.mediumImpact();
+                  Clipboard.setData(ClipboardData(text: message.text!));
+                  showAppSnack('Message copied', tone: SnackTone.success);
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: const BoxDecoration(
+                    gradient: AppGradients.userBubble,
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(20),
+                      topRight: Radius.circular(20),
+                      bottomLeft: Radius.circular(20),
+                      bottomRight: Radius.circular(6),
+                    ),
+                  ),
+                  child: Text(message.text!, style: AppText.body.copyWith(color: Colors.white)),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _FileChip extends StatelessWidget {
+class _AttachmentChip extends StatelessWidget {
   final String name;
   final ChatAttachmentType? type;
-  final bool isUser;
-
-  const _FileChip({required this.name, required this.type, required this.isUser});
-
-  IconData get _icon {
-    switch (type) {
-      case ChatAttachmentType.image:
-        return Icons.image_outlined;
-      case ChatAttachmentType.audio:
-        return Icons.audio_file_outlined;
-      default:
-        return Icons.insert_drive_file_outlined;
-    }
-  }
+  const _AttachmentChip({required this.name, required this.type});
 
   @override
   Widget build(BuildContext context) {
+    final (icon, color) = _attachmentVisual(type);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
       decoration: BoxDecoration(
-        color: isUser
-            ? Colors.white.withValues(alpha: 0.15)
-            : Pallete.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
+        color: AppColors.surface2,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        border: Border.all(color: AppColors.borderStrong),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(_icon, size: 15, color: isUser ? Pallete.white : Pallete.primary),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              name,
-              style: TextStyle(
-                fontSize: 12,
-                color: isUser ? Pallete.white : Pallete.primary,
-                fontWeight: FontWeight.w500,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(AppRadius.sm),
             ),
+            child: Icon(icon, size: 18, color: color),
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(name, style: AppText.label, maxLines: 1, overflow: TextOverflow.ellipsis),
           ),
         ],
       ),
     );
   }
 }
+
+(IconData, Color) _attachmentVisual(ChatAttachmentType? type) => switch (type) {
+      ChatAttachmentType.image => (Icons.image_rounded, AppColors.info),
+      ChatAttachmentType.audio => (Icons.graphic_eq_rounded, AppColors.magenta),
+      _ => (Icons.description_rounded, AppColors.warning),
+    };
+
+class _AssistantMessage extends StatelessWidget {
+  final ChatMessageModel message;
+  final bool isLatest;
+  final VoidCallback onRetry;
+
+  const _AssistantMessage({required this.message, required this.isLatest, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    if (message.isLoading) {
+      return Row(
+        children: [
+          const LabMark(size: 28),
+          const SizedBox(width: AppSpace.sm),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: AppColors.surface2,
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Thinking', style: AppText.caption.copyWith(color: AppColors.textSecondary))
+                    .animate(onPlay: (c) => c.repeat())
+                    .shimmer(duration: 1400.ms, color: Colors.white),
+                const SizedBox(width: 8),
+                const TypingDots(),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (message.isError) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: const BoxDecoration(color: AppColors.dangerSoft, shape: BoxShape.circle),
+            child: const Icon(Icons.priority_high_rounded, size: 16, color: AppColors.danger),
+          ),
+          const SizedBox(width: AppSpace.sm),
+          Expanded(
+            child: Surface(
+              padding: const EdgeInsets.all(AppSpace.sm + 2),
+              radius: AppRadius.md,
+              color: AppColors.dangerSoft,
+              borderColor: AppColors.danger.withValues(alpha: 0.3),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Message not delivered', style: AppText.label.copyWith(color: AppColors.danger)),
+                  if ((message.text ?? '').isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(message.text!, style: AppText.caption, maxLines: 3, overflow: TextOverflow.ellipsis),
+                  ],
+                  if (isLatest) ...[
+                    const SizedBox(height: AppSpace.sm),
+                    GhostButton(
+                      label: 'Try again',
+                      icon: Icons.refresh_rounded,
+                      expand: false,
+                      height: 36,
+                      onPressed: onRetry,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    final text = message.text ?? '';
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const LabMark(size: 28),
+        const SizedBox(width: AppSpace.sm),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (text.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: GptMarkdown(
+                    text,
+                    style: AppText.body,
+                    onLinkTap: (url, _) {
+                      final uri = Uri.tryParse(url);
+                      if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+                    },
+                  ),
+                ),
+              if (message.fileUrl != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: AppSpace.sm),
+                  child: _ResponseFilePreview(url: message.fileUrl!),
+                ),
+              if (text.isNotEmpty) _MessageActions(text: text),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MessageActions extends StatefulWidget {
+  final String text;
+  const _MessageActions({required this.text});
+
+  @override
+  State<_MessageActions> createState() => _MessageActionsState();
+}
+
+class _MessageActionsState extends State<_MessageActions> {
+  bool _copied = false;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) setState(() => _copied = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          _TinyAction(
+            icon: _copied ? Icons.check_rounded : Icons.copy_rounded,
+            label: _copied ? 'Copied' : 'Copy',
+            color: _copied ? AppColors.success : AppColors.textTertiary,
+            onTap: _copy,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TinyAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _TinyAction({required this.icon, required this.label, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Pressable(
+      onTap: onTap,
+      pressedScale: 0.92,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+        child: AnimatedSwitcher(
+          duration: AppMotion.fast,
+          child: Row(
+            key: ValueKey(label),
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 15, color: color),
+              const SizedBox(width: 4),
+              Text(label, style: AppText.caption.copyWith(color: color)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Pending attachment (inside composer) ────────────────────────────────────
+
+class _PendingAttachment extends StatelessWidget {
+  final File? file;
+  final String name;
+  final ChatAttachmentType? type;
+  final bool uploading;
+  final VoidCallback onClear;
+
+  const _PendingAttachment({
+    required this.file,
+    required this.name,
+    required this.type,
+    required this.uploading,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color) = _attachmentVisual(type);
+    final isImage = type == ChatAttachmentType.image && file != null;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      child: Container(
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          color: AppColors.surface3,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+        ),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+              child: SizedBox(
+                width: 44,
+                height: 44,
+                child: isImage
+                    ? Image.file(file!, fit: BoxFit.cover, cacheWidth: 132)
+                    : ColoredBox(color: color.withValues(alpha: 0.15), child: Icon(icon, color: color, size: 20)),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name, style: AppText.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 4),
+                  if (uploading)
+                    const ClipRRect(
+                      borderRadius: BorderRadius.all(Radius.circular(2)),
+                      child: LinearProgressIndicator(minHeight: 3),
+                    )
+                  else
+                    Row(
+                      children: [
+                        const Icon(Icons.check_circle_rounded, size: 13, color: AppColors.success),
+                        const SizedBox(width: 4),
+                        Text('Ready to send', style: AppText.caption.copyWith(color: AppColors.success)),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+            if (!uploading)
+              IconButton(
+                tooltip: 'Remove attachment',
+                onPressed: onClear,
+                icon: const Icon(Icons.close_rounded, size: 18, color: AppColors.textSecondary),
+              )
+            else
+              const SizedBox(width: AppSpace.sm),
+          ],
+        ),
+      ),
+    ).animate().fadeIn(duration: AppMotion.base).scaleXY(begin: 0.96, end: 1, curve: AppMotion.emphasized);
+  }
+}
+
+class _AttachOption extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _AttachOption({required this.icon, required this.label, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Pressable(
+        onTap: onTap,
+        pressedScale: 0.92,
+        child: Column(
+          children: [
+            Container(
+              height: 64,
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                border: Border.all(color: color.withValues(alpha: 0.2)),
+              ),
+              child: Center(child: Icon(icon, color: color, size: 26)),
+            ),
+            const SizedBox(height: AppSpace.xs),
+            Text(label, style: AppText.caption.copyWith(color: AppColors.text)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Response file previews ──────────────────────────────────────────────────
 
 class _ResponseFilePreview extends StatelessWidget {
   final String url;
@@ -462,46 +1112,25 @@ class _ResponseFilePreview extends StatelessWidget {
 
   String get _path => url.toLowerCase().split('?').first;
 
-  bool get _isImage =>
-      _path.endsWith('.jpg') ||
-      _path.endsWith('.jpeg') ||
-      _path.endsWith('.png') ||
-      _path.endsWith('.gif') ||
-      _path.endsWith('.webp') ||
-      _path.endsWith('.bmp');
+  bool _endsWithAny(List<String> exts) => exts.any(_path.endsWith);
 
-  bool get _isAudio =>
-      _path.endsWith('.mp3') ||
-      _path.endsWith('.wav') ||
-      _path.endsWith('.ogg') ||
-      _path.endsWith('.m4a') ||
-      _path.endsWith('.aac') ||
-      _path.endsWith('.flac') ||
-      _path.endsWith('.opus') ||
-      _path.endsWith('.wma');
+  bool get _isImage => _endsWithAny(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
+  bool get _isAudio => _endsWithAny(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.opus', '.wma']);
+  bool get _isVideo => _endsWithAny(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.3gp']);
 
-  bool get _isVideo =>
-      _path.endsWith('.mp4') ||
-      _path.endsWith('.mov') ||
-      _path.endsWith('.avi') ||
-      _path.endsWith('.mkv') ||
-      _path.endsWith('.webm') ||
-      _path.endsWith('.m4v') ||
-      _path.endsWith('.3gp');
-
-  String get _fileName => url.split('/').last.split('?').first;
+  String get _fileName => Uri.decodeComponent(url.split('/').last.split('?').first);
 
   IconData get _fileIcon {
-    if (_path.endsWith('.pdf')) return Icons.picture_as_pdf_outlined;
-    if (_isAudio) return Icons.audio_file_outlined;
-    if (_isVideo) return Icons.video_file_outlined;
-    return Icons.insert_drive_file_outlined;
+    if (_path.endsWith('.pdf')) return Icons.picture_as_pdf_rounded;
+    if (_endsWithAny(['.xls', '.xlsx', '.csv'])) return Icons.table_chart_rounded;
+    if (_endsWithAny(['.ppt', '.pptx'])) return Icons.slideshow_rounded;
+    return Icons.description_rounded;
   }
 
   Future<void> _open() async {
     final uri = Uri.parse(url);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      showAppSnack('Couldn\'t open the file', tone: SnackTone.error);
     }
   }
 
@@ -513,59 +1142,53 @@ class _ResponseFilePreview extends StatelessWidget {
       return GestureDetector(
         onTap: _open,
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.network(
-            url,
-            fit: BoxFit.cover,
-            loadingBuilder: (_, child, progress) => progress == null
-                ? child
-                : Container(
-                    height: 140,
-                    alignment: Alignment.center,
-                    child: const CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Pallete.primary,
-                    ),
-                  ),
-            errorBuilder: (_, __, ___) => _buildFileChip(),
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 320),
+            child: Image.network(
+              url,
+              fit: BoxFit.cover,
+              loadingBuilder: (_, child, progress) => progress == null
+                  ? child
+                  : const Skeleton(width: double.infinity, height: 200, radius: AppRadius.lg),
+              errorBuilder: (_, __, ___) => _fileCard(),
+            ),
           ),
         ),
       );
     }
-    return _buildFileChip();
+    return _fileCard();
   }
 
-  Widget _buildFileChip() {
-    return GestureDetector(
+  Widget _fileCard() {
+    return Pressable(
       onTap: _open,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: Pallete.primary.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
-        ),
+      child: Surface(
+        padding: const EdgeInsets.all(AppSpace.sm),
+        radius: AppRadius.md,
+        color: AppColors.surface2,
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(_fileIcon, size: 16, color: Pallete.primary),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                _fileName,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Pallete.primary,
-                  fontWeight: FontWeight.w500,
-                  decoration: TextDecoration.underline,
-                  decorationColor: Pallete.primary,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: AppColors.brandSoft,
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
+              child: Icon(_fileIcon, size: 20, color: AppColors.brand),
+            ),
+            const SizedBox(width: AppSpace.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_fileName, style: AppText.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const Text('Tap to open', style: AppText.caption),
+                ],
               ),
             ),
-            const SizedBox(width: 6),
-            const Icon(Icons.open_in_new, size: 12, color: Pallete.primary),
+            const Icon(Icons.open_in_new_rounded, size: 18, color: AppColors.textSecondary),
           ],
         ),
       ),
@@ -615,6 +1238,8 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
   Future<void> _toggle() async {
     if (_state == PlayerState.playing) {
       await _player.pause();
+    } else if (_state == PlayerState.paused) {
+      await _player.resume();
     } else {
       await _player.play(UrlSource(widget.url));
     }
@@ -633,73 +1258,45 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
         ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
         : 0.0;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
-      decoration: BoxDecoration(
-        color: Pallete.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
-      ),
+    return Surface(
+      padding: const EdgeInsets.fromLTRB(8, 8, 14, 8),
+      radius: AppRadius.pill,
+      color: AppColors.surface2,
       child: Row(
         children: [
-          GestureDetector(
-            onTap: _toggle,
-            child: Container(
-              width: 36,
-              height: 36,
-              decoration: const BoxDecoration(
-                color: Pallete.primary,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                color: Pallete.white,
-                size: 20,
+          Semantics(
+            button: true,
+            label: isPlaying ? 'Pause audio' : 'Play audio',
+            child: Pressable(
+              onTap: _toggle,
+              pressedScale: 0.9,
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: const BoxDecoration(gradient: AppGradients.brand, shape: BoxShape.circle),
+                child: AnimatedSwitcher(
+                  duration: AppMotion.fast,
+                  child: Icon(
+                    isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                    key: ValueKey(isPlaying),
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                ),
               ),
             ),
           ),
-          const SizedBox(width: 10),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 2,
-                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-                    activeTrackColor: Pallete.primary,
-                    inactiveTrackColor: Pallete.primary.withValues(alpha: 0.2),
-                    thumbColor: Pallete.primary,
-                    overlayColor: Pallete.primary.withValues(alpha: 0.15),
-                  ),
-                  child: Slider(
-                    value: progress,
-                    onChanged: _duration.inMilliseconds > 0
-                        ? (v) {
-                            final pos = Duration(
-                              milliseconds: (v * _duration.inMilliseconds).round(),
-                            );
-                            _player.seek(pos);
-                          }
-                        : null,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(_fmt(_position),
-                          style: const TextStyle(color: Pallete.grey, fontSize: 10)),
-                      Text(_fmt(_duration),
-                          style: const TextStyle(color: Pallete.grey, fontSize: 10)),
-                    ],
-                  ),
-                ),
-              ],
+            child: Slider(
+              value: progress,
+              onChanged: _duration.inMilliseconds > 0
+                  ? (v) => _player.seek(Duration(milliseconds: (v * _duration.inMilliseconds).round()))
+                  : null,
             ),
+          ),
+          Text(
+            '${_fmt(_position)} / ${_fmt(_duration)}',
+            style: AppText.caption.copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
           ),
         ],
       ),
@@ -736,10 +1333,10 @@ class _VideoPlayerWidgetState extends State<_VideoPlayerWidget> {
           looping: false,
           placeholder: Container(color: Colors.black),
           materialProgressColors: ChewieProgressColors(
-            playedColor: Pallete.primary,
-            handleColor: Pallete.primary,
-            backgroundColor: Pallete.primary.withValues(alpha: 0.2),
-            bufferedColor: Pallete.primary.withValues(alpha: 0.4),
+            playedColor: AppColors.brand,
+            handleColor: Colors.white,
+            backgroundColor: AppColors.brand.withValues(alpha: 0.2),
+            bufferedColor: AppColors.brand.withValues(alpha: 0.4),
           ),
         );
       });
@@ -758,297 +1355,31 @@ class _VideoPlayerWidgetState extends State<_VideoPlayerWidget> {
   @override
   Widget build(BuildContext context) {
     if (_hasError) {
-      return Container(
-        height: 100,
-        decoration: BoxDecoration(
-          color: Pallete.primary.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
-        ),
-        child: const Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.error_outline, color: Pallete.grey, size: 24),
-              SizedBox(height: 4),
-              Text('Could not load video',
-                  style: TextStyle(color: Pallete.grey, fontSize: 12)),
-            ],
-          ),
+      return Surface(
+        color: AppColors.surface2,
+        radius: AppRadius.lg,
+        child: const Row(
+          children: [
+            Icon(Icons.videocam_off_rounded, color: AppColors.textSecondary, size: 20),
+            SizedBox(width: AppSpace.sm),
+            Text('Couldn\'t load this video', style: AppText.bodySecondary),
+          ],
         ),
       );
     }
 
     if (_chewieController == null) {
-      return AspectRatio(
+      return const AspectRatio(
         aspectRatio: 16 / 9,
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: const Center(
-            child: CircularProgressIndicator(color: Pallete.primary, strokeWidth: 2),
-          ),
-        ),
+        child: Skeleton(width: double.infinity, height: double.infinity, radius: AppRadius.lg),
       );
     }
 
     return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(AppRadius.lg),
       child: AspectRatio(
         aspectRatio: _vpController.value.aspectRatio,
         child: Chewie(controller: _chewieController!),
-      ),
-    );
-  }
-}
-
-class _TypingIndicator extends StatelessWidget {
-  final AnimationController controller;
-
-  const _TypingIndicator({required this.controller});
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (_, __) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (i) {
-            final delay = i * 0.25;
-            final t = ((controller.value + delay) % 1.0);
-            final opacity = (t < 0.5 ? t * 2 : (1 - t) * 2).clamp(0.3, 1.0);
-            return Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: Opacity(
-                opacity: opacity,
-                child: const CircleAvatar(
-                  radius: 4,
-                  backgroundColor: Pallete.grey,
-                ),
-              ),
-            );
-          }),
-        );
-      },
-    );
-  }
-}
-
-// ─── Bottom input bar ─────────────────────────────────────────────────────────
-
-class _BottomBar extends StatelessWidget {
-  final TextEditingController controller;
-  final bool isUploading;
-  final bool isSending;
-  final String? pendingFileName;
-  final ChatAttachmentType? pendingType;
-  final VoidCallback onClearAttachment;
-  final VoidCallback onAttachTap;
-  final VoidCallback onSend;
-
-  const _BottomBar({
-    required this.controller,
-    required this.isUploading,
-    required this.isSending,
-    required this.pendingFileName,
-    required this.pendingType,
-    required this.onClearAttachment,
-    required this.onAttachTap,
-    required this.onSend,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Pallete.darkBg,
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (pendingFileName != null || isUploading)
-              _PendingAttachmentChip(
-                name: pendingFileName ?? 'Uploading…',
-                type: pendingType,
-                isUploading: isUploading,
-                onClear: onClearAttachment,
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: (isSending || isUploading) ? null : onAttachTap,
-                    icon: const Icon(Icons.attach_file_rounded),
-                    color: Pallete.primary,
-                    iconSize: 22,
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: controller,
-                      enabled: !isSending,
-                      maxLines: 4,
-                      minLines: 1,
-                      textCapitalization: TextCapitalization.sentences,
-                      style: const TextStyle(color: Pallete.white, fontSize: 14),
-                      decoration: InputDecoration(
-                        hintText: 'Type a message…',
-                        hintStyle: const TextStyle(color: Pallete.grey, fontSize: 14),
-                        filled: true,
-                        fillColor: Pallete.grey19,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: (isSending || isUploading) ? null : onSend,
-                    child: Container(
-                      width: 42,
-                      height: 42,
-                      decoration: BoxDecoration(
-                        color: (isSending || isUploading)
-                            ? Pallete.primary.withValues(alpha: 0.4)
-                            : Pallete.primary,
-                        shape: BoxShape.circle,
-                      ),
-                      child: isSending
-                          ? const Padding(
-                              padding: EdgeInsets.all(11),
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Pallete.white,
-                              ),
-                            )
-                          : const Icon(Icons.send_rounded, color: Pallete.white, size: 18),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PendingAttachmentChip extends StatelessWidget {
-  final String name;
-  final ChatAttachmentType? type;
-  final bool isUploading;
-  final VoidCallback onClear;
-
-  const _PendingAttachmentChip({
-    required this.name,
-    required this.type,
-    required this.isUploading,
-    required this.onClear,
-  });
-
-  IconData get _icon {
-    switch (type) {
-      case ChatAttachmentType.image:
-        return Icons.image_outlined;
-      case ChatAttachmentType.audio:
-        return Icons.audio_file_outlined;
-      default:
-        return Icons.insert_drive_file_outlined;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: Row(
-        children: [
-          Container(
-            constraints: const BoxConstraints(maxWidth: 260),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-            decoration: BoxDecoration(
-              color: Pallete.primary.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Pallete.primary.withValues(alpha: 0.3)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (isUploading)
-                  const SizedBox(
-                    width: 13,
-                    height: 13,
-                    child: CircularProgressIndicator(strokeWidth: 1.5, color: Pallete.primary),
-                  )
-                else
-                  Icon(_icon, size: 14, color: Pallete.primary),
-                const SizedBox(width: 7),
-                Flexible(
-                  child: Text(
-                    name,
-                    style: const TextStyle(color: Pallete.primary, fontSize: 12, fontWeight: FontWeight.w500),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (!isUploading)
-            GestureDetector(
-              onTap: onClear,
-              child: const Padding(
-                padding: EdgeInsets.only(left: 6),
-                child: Icon(Icons.close, size: 16, color: Pallete.grey),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Attachment option tile ───────────────────────────────────────────────────
-
-class _AttachOption extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color color;
-  final VoidCallback onTap;
-
-  const _AttachOption({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 58,
-            height: 58,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Icon(icon, color: color, size: 26),
-          ),
-          const SizedBox(height: 8),
-          Text(label, style: const TextStyle(color: Pallete.grey, fontSize: 12)),
-        ],
       ),
     );
   }

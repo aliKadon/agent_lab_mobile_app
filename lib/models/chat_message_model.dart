@@ -8,6 +8,15 @@ class ChatMessageModel {
   final bool isLoading;
   final String? fileUrl;
 
+  /// Local path of an attachment the user sent, used to render a thumbnail.
+  final String? localPath;
+
+  /// Server-side path of the uploaded attachment, kept so a failed send can be retried.
+  final String? uploadedPath;
+
+  /// True when this assistant message represents a failed request.
+  final bool isError;
+
   const ChatMessageModel({
     this.text,
     required this.isUser,
@@ -15,5 +24,8 @@ class ChatMessageModel {
     this.attachmentType,
     this.isLoading = false,
     this.fileUrl,
+    this.localPath,
+    this.uploadedPath,
+    this.isError = false,
   });
 }
